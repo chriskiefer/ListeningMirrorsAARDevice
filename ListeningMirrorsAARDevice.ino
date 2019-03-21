@@ -3,7 +3,8 @@
 #include "driver/i2s.h"
 #include "maxi.h"
 
-//maxiFilter filt;
+
+maxiFilter filt;
 //maxiOsc osc;
 
 maxiSVF svf;
@@ -57,70 +58,61 @@ void connectToAP() {
   Serial.println("Waiting for WIFI connection...");
 }
 
-bool setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT) {
-  m_BCLK = BCLK;          // Bit Clock
-  m_LRC = LRC;            // Left/Right Clock
-  m_DOUT = DOUT;          // Data Out
 
-  i2s_pin_config_t pins = {
-    .bck_io_num = m_BCLK,
-    .ws_io_num =  m_LRC,              //  wclk,
-    .data_out_num = m_DOUT,
-    .data_in_num = I2S_PIN_NO_CHANGE
-  };
-  i2s_set_pin((i2s_port_t)m_i2s_num, &pins);
-  return true;
-}
-
-
-//inline bool playSample(int32_t sample[2]) {
-//  size_t m_bytesWritten = 0;
-//  uint64_t s64;
-//  s64 = ((sample[1]) << 32) | (sample[0] & 0xffffffff);
-//  esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&s64, sizeof(uint64_t), &m_bytesWritten, 1000);
-//  if (err != ESP_OK) {
-//    Serial.print("ESP32 Errorcode ");
-//    Serial.println(err);
-//    return false; // Can't stuff any more in I2S...
-//  }
-//  return true;
-//}
-//---------------------------------------------------------------------------------------------------------------------
-//---------------------------------------------------------------------------------------------------------------------
 int frame = 0;
 uint16_t buf_len = 1024;
 char buf[1024];
-xQueueHandle xDspInQueue, xDspOutQueue;
 
+QueueHandle_t xQueueToDSP;
+QueueHandle_t xQueueFromDSP;
 
 void coreTask( void * pvParameters ) {
 
   String taskMessage = "Core task running on core ";
   taskMessage = taskMessage + xPortGetCoreID();
   Serial.println(taskMessage);
-
+  float data;
   while (true) {
-    float data;
-    BaseType_t xRxStatus = xQueueReceive( xDspInQueue, &data, 0 );
-    /* check whether receiving is ok or not */
-    if (xRxStatus == pdPASS) {
-//                Serial.println("-");
-      BaseType_t xTxStatus = xQueueSendToFront( xDspOutQueue, &data, 0 );
-      /* check whether sending is ok or not */
-      if ( xTxStatus == pdPASS ) {
-        /* increase counter of sender 1 */
-//                Serial.println(";");
+    if (xQueueReceive( xQueueToDSP, &data, 0))
+    {
+      Serial.println(data);
+      data = filt.lores(data, 500, 1);
+      if (xQueueSendToFront(xQueueFromDSP, &data, 0) != pdPASS) {
+        Serial.println("xQueueFromDSP send failed");
+      } else {
+        //        Serial.println("Queue send ok");
       }
+
+    } else {
+      Serial.println("queue fail");
     }
   }
 
 }
 
 void setup() {
+  Serial.begin(115200);
 
-  xDspInQueue = xQueueCreate(1024, sizeof(float));
-  xDspOutQueue = xQueueCreate(1024, sizeof(float));
 
+  xQueueToDSP = xQueueCreate( 2048, sizeof(float));
+
+  if ( xQueueToDSP == NULL )
+  {
+    Serial.println("Could not create xQueueToDSP");
+  }
+  else
+  {
+    Serial.println("xQueueToDSP created");
+  }
+  xQueueFromDSP = xQueueCreate( 2048, sizeof(float));
+  if ( xQueueFromDSP == NULL )
+  {
+    Serial.println("Could not create xQueueFromDSP");
+  }
+  else
+  {
+    Serial.println("xQueueFromDSP created");
+  }
   maxiSettings::setup(44100, 2,  64);
   svf.setCutoff(3000);
   svf.setResonance(10);
@@ -143,8 +135,13 @@ void setup() {
   m_BCLK = 26;                     // Bit Clock
   m_LRC = 25;                      // Left/Right Clock
   m_DOUT = 27;                     // Data Out
-  setPinout(m_BCLK, m_LRC, m_DOUT);
-
+  i2s_pin_config_t pins = {
+    .bck_io_num = m_BCLK,
+    .ws_io_num =  m_LRC,              //  wclk,
+    .data_out_num = m_DOUT,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+  i2s_set_pin((i2s_port_t)m_i2s_num, &pins);
   i2s_start((i2s_port_t) m_i2s_num);
 
   const i2s_config_t i2s_config_microphone = {
@@ -181,7 +178,6 @@ void setup() {
     audioOutBuffer[i] = 0.0;
   }
   netState = DISCONNECTED;
-  Serial.begin(115200);
   // Set WiFi to station mode and disconnect from an AP if it was previously connected
   Serial.print("Connecting to ");
   Serial.println(ssid);
@@ -205,9 +201,6 @@ void setup() {
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
-
-
-  //  delay(100);
 
   xTaskCreatePinnedToCore(
     coreTask,   /* Function to implement the task */
@@ -282,6 +275,21 @@ void loop() {
 
         int32_t *intPtr = (int32_t*) &buf[0];
         float mean = 0.f;
+        float data = 103.4;
+//        if (samples_read > 0) {
+//          if (xQueueSendToFront(xQueueToDSP, &data, 0) != pdPASS) {
+//            //            Serial.println("Queue send failed");
+//          } else {
+//            //            Serial.println("Queue send ok");
+//          }
+//          if (xQueueReceive( xQueueFromDSP, &data, 0))
+//          {
+//            Serial.println(data);
+//          } else {
+////            Serial.println("xQueueFromDSP fail");
+//          }
+//
+//        }
         for (int i = 0; i < samples_read; i += 2) {
           float w = intPtr[i] / (float) 0x7fffffff;
           //    w = w * 1.5f;
@@ -290,15 +298,22 @@ void loop() {
           //    w = filt.lopass(w, 0.5);
           //    mean += w;
           //    w *= 0.05f;
-          /* keep the status of sending data */
-          xStatus = xQueueSendToFront( xDspInQueue, &w, 0 );
-          /* check whether sending is ok or not */
-          if ( xStatus == pdPASS ) {
-            /* increase counter of sender 1 */
-//                        Serial.println("sendTask sent data");
-          }
 
           //          w = svf.play(w, 0.f, 1.f, 0.f, 0.f);
+          if (xQueueSendToFront(xQueueToDSP, &w, 0) != pdPASS) {
+            //            Serial.println("Queue send failed");
+          } else {
+            //            Serial.println("Queue send ok");
+          }
+          if (xQueueReceive( xQueueFromDSP, &data, 0))
+          {
+//            Serial.println(data);
+//            audioOutBuffer[blockPos] = data * 50.0f;
+//            blockPos++;
+          } else {
+//            Serial.println("xQueueFromDSP fail");
+          }
+          
           audioOutBuffer[blockPos] = w * 50.0f;
           blockPos++;
           if (blockPos == audioBlockSize) {
@@ -326,32 +341,6 @@ void loop() {
           Serial.print("ESP32 Errorcode ");
           Serial.println(err);
         }
-
-
-//        float dspOut;
-//        BaseType_t xRxStatus;
-//        xRxStatus = xQueueReceive( xDspOutQueue, &dspOut, 0 );
-//        /* check whether receiving is ok or not */
-//        while (xRxStatus == pdPASS) {
-//          Serial.println(".");
-//          xRxStatus = xQueueReceive( xDspOutQueue, &dspOut, 0 );
-//        }
-
-
-
-        //        if (samples_read > 0) {
-        //          for (int i = 0; i < samples_read; i++) {
-        //            //            audioOutBuffer[i] = sin(audioFrame * 0.4);
-        //            audioFrame++;
-        //          }
-        //          udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
-        //          udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * audioBlockSize);
-        //        }
-
-        //      if (!udpStreamOut.endPacket()) {
-        //        Serial.print("Error");
-        //      }
-        //      delay(10);
       }
       break;
 
