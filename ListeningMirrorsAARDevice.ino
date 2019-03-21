@@ -3,9 +3,10 @@
 #include "driver/i2s.h"
 #include "maxi.h"
 
-maxiFilter filt;
-maxiOsc osc;
+//maxiFilter filt;
+//maxiOsc osc;
 
+maxiSVF svf;
 #define SERVER_ADVERT_STRING "%groundControlTo?"
 
 const char* ssid     = "ListeningMirrors";
@@ -72,24 +73,58 @@ bool setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT) {
 }
 
 
-inline bool playSample(int32_t sample[2]) {
-  size_t m_bytesWritten = 0;
-  uint64_t s64;
-  s64 = ((sample[1]) << 32) | (sample[0] & 0xffffffff);
-  esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&s64, sizeof(uint64_t), &m_bytesWritten, 1000);
-  if (err != ESP_OK) {
-    Serial.print("ESP32 Errorcode ");
-    Serial.println(err);
-    return false; // Can't stuff any more in I2S...
+//inline bool playSample(int32_t sample[2]) {
+//  size_t m_bytesWritten = 0;
+//  uint64_t s64;
+//  s64 = ((sample[1]) << 32) | (sample[0] & 0xffffffff);
+//  esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&s64, sizeof(uint64_t), &m_bytesWritten, 1000);
+//  if (err != ESP_OK) {
+//    Serial.print("ESP32 Errorcode ");
+//    Serial.println(err);
+//    return false; // Can't stuff any more in I2S...
+//  }
+//  return true;
+//}
+//---------------------------------------------------------------------------------------------------------------------
+//---------------------------------------------------------------------------------------------------------------------
+int frame = 0;
+uint16_t buf_len = 1024;
+char buf[1024];
+xQueueHandle xDspInQueue, xDspOutQueue;
+
+
+void coreTask( void * pvParameters ) {
+
+  String taskMessage = "Core task running on core ";
+  taskMessage = taskMessage + xPortGetCoreID();
+  Serial.println(taskMessage);
+
+  while (true) {
+    float data;
+    BaseType_t xRxStatus = xQueueReceive( xDspInQueue, &data, 0 );
+    /* check whether receiving is ok or not */
+    if (xRxStatus == pdPASS) {
+//                Serial.println("-");
+      BaseType_t xTxStatus = xQueueSendToFront( xDspOutQueue, &data, 0 );
+      /* check whether sending is ok or not */
+      if ( xTxStatus == pdPASS ) {
+        /* increase counter of sender 1 */
+//                Serial.println(";");
+      }
+    }
   }
-  return true;
+
 }
-//---------------------------------------------------------------------------------------------------------------------
-//---------------------------------------------------------------------------------------------------------------------
 
 void setup() {
 
+  xDspInQueue = xQueueCreate(1024, sizeof(float));
+  xDspOutQueue = xQueueCreate(1024, sizeof(float));
+
   maxiSettings::setup(44100, 2,  64);
+  svf.setCutoff(3000);
+  svf.setResonance(10);
+
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = 44100,
@@ -172,11 +207,24 @@ void setup() {
   Serial.println(WiFi.localIP());
 
 
+  //  delay(100);
+
+  xTaskCreatePinnedToCore(
+    coreTask,   /* Function to implement the task */
+    "coreTask", /* Name of the task */
+    10000,      /* Stack size in words */
+    NULL,       /* Task input parameter */
+    0,          /* Priority of the task */
+    NULL,       /* Task handle. */
+    1);  /* Core where the task should run */
+
+
 }
 
-int frame = 0;
-uint16_t buf_len = 1024;
-char buf[1024];
+BaseType_t xStatus;
+/* time to block the task until the queue has free space */
+const TickType_t xTicksToWait = pdMS_TO_TICKS(100);
+
 
 void loop() {
 
@@ -209,8 +257,8 @@ void loop() {
               tcpClient.read(data, 2);
               Serial.println((char *)data);
               //              udpStreamOut.begin(LMServerIP, STREAM_SOURCE_PORT);
-              netState = CONNECTED;
               Serial.println("Sending audio...");
+              netState = CONNECTED;
             } else {
               Serial.println("Can't connect to LM Server control service");
             }
@@ -230,7 +278,7 @@ void loop() {
 
         uint32_t samples_read = bytes_read  / (I2S_BITS_PER_SAMPLE_32BIT / 8);
 
-        Serial.println(samples_read);
+        //        Serial.println(samples_read);
 
         int32_t *intPtr = (int32_t*) &buf[0];
         float mean = 0.f;
@@ -242,16 +290,27 @@ void loop() {
           //    w = filt.lopass(w, 0.5);
           //    mean += w;
           //    w *= 0.05f;
+          /* keep the status of sending data */
+          xStatus = xQueueSendToFront( xDspInQueue, &w, 0 );
+          /* check whether sending is ok or not */
+          if ( xStatus == pdPASS ) {
+            /* increase counter of sender 1 */
+//                        Serial.println("sendTask sent data");
+          }
+
+          //          w = svf.play(w, 0.f, 1.f, 0.f, 0.f);
           audioOutBuffer[blockPos] = w * 50.0f;
           blockPos++;
           if (blockPos == audioBlockSize) {
             blockPos = 0;
             udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
             udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * audioBlockSize);
-//            if (!udpStreamOut.endPacket()) {
-//              Serial.print("Error");
-//            }
+            if (!udpStreamOut.endPacket()) {
+              Serial.print("Error");
+            }
+            //            Serial.println("send");
           }
+
           //    if (i == 0) {
           //      Serial.println(w);
           //    }
@@ -268,6 +327,18 @@ void loop() {
           Serial.println(err);
         }
 
+
+//        float dspOut;
+//        BaseType_t xRxStatus;
+//        xRxStatus = xQueueReceive( xDspOutQueue, &dspOut, 0 );
+//        /* check whether receiving is ok or not */
+//        while (xRxStatus == pdPASS) {
+//          Serial.println(".");
+//          xRxStatus = xQueueReceive( xDspOutQueue, &dspOut, 0 );
+//        }
+
+
+
         //        if (samples_read > 0) {
         //          for (int i = 0; i < samples_read; i++) {
         //            //            audioOutBuffer[i] = sin(audioFrame * 0.4);
@@ -283,6 +354,7 @@ void loop() {
         //      delay(10);
       }
       break;
+
   };
 }
 
