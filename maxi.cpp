@@ -406,7 +406,14 @@ void maxiEnvelope::trigger(int index, float amp) {
 
 //Delay with feedback
 maxiDelayline::maxiDelayline() {
-  memset( memory, 0, 88200*sizeof (float) );
+//  memset( memory, 0, 44100*sizeof (float) );
+//  memory.resize(1000);
+  memory = new float[22050];
+}
+maxiDelayline::~maxiDelayline() {
+//  memset( memory, 0, 44100*sizeof (float) );
+//  memory.resize(1000);
+  delete memory;
 }
 
 
@@ -418,7 +425,6 @@ float maxiDelayline::dl(float input, int size, float feedback)  {
   memory[phase]=(memory[phase]*feedback)+(input*feedback)*0.5;
   phase+=1;
   return(output);
-  
 }
 
 float maxiDelayline::dl(float input, int size, float feedback, int position)  {
@@ -428,7 +434,6 @@ float maxiDelayline::dl(float input, int size, float feedback, int position)  {
   memory[phase]=(memory[phase]*feedback)+(input*feedback)*chandiv;
   phase+=1;
   return(output);
-  
 }
 
 //I particularly like these. cutoff between 0 and 1
@@ -450,9 +455,9 @@ float maxiFilter::lores(float input,float cutoff1, float resonance) {
   if (cutoff<10) cutoff=10;
   if (cutoff>(maxiSettings::sampleRate)) cutoff=(maxiSettings::sampleRate);
   if (resonance<1.) resonance = 1.;
-  z=cos(TWOPI*cutoff/maxiSettings::sampleRate);
+  z=cosf(TWOPI*cutoff/maxiSettings::sampleRate);
   c=2-2*z;
-  float r=(sqrt(2.0)*sqrt(-pow((z-1.0),3.0))+resonance*(z-1))/(resonance*(z-1));
+  float r=(sqrtf(2.0)*sqrtf(-powf((z-1.0),3.0))+resonance*(z-1))/(resonance*(z-1));
   x=x+(input-y)*c;
   y=y+x;
   x=x*r;

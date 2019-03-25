@@ -172,10 +172,11 @@ class maxiDelayline {
   float startphase;
   float endphase;
   float output;
-  float memory[88200];
+  float *memory;
 
 public:
   maxiDelayline();
+  ~maxiDelayline();
   float dl(float input, int size, float feedback);
   float dl(float input, int size, float feedback, int position);
 
@@ -771,7 +772,7 @@ private:
     inline void setParams(float _freq, float _res) {
         freq = _freq;
         res = _res;
-        g = tan(PI * freq / maxiSettings::sampleRate);
+        g = tanf(PI * freq / maxiSettings::sampleRate);
         damping = res == 0 ? 0 : 1.0 / res;
         k = damping;
         ginv = g / (1.0 + g * (g + k));
