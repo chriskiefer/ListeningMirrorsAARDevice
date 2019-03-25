@@ -17,6 +17,7 @@ const char* password = "badgersbadgers";
 
 
 const int GIVEREQ = 17;
+const int RECEIVEREQ = 18;
 //const char * udpAddress = "192.168.0.255";
 const int udpAdvPort = 13252;
 const int UDP_PORT = 13251;
@@ -35,13 +36,14 @@ uint8_t m_DOUT = 0; // Data Out
 
 i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 
-WiFiUDP udp, udpStreamOut;
+WiFiUDP udp, udpStreamOut, udpStreamIn;
 enum networkState {DISCONNECTED, CONNECTING, WAITING_FOR_ADVERT, CONNECTED} netState;
 boolean connected = false;
 IPAddress LMServerIP;
 
-float audioOutBuffer[512];
-int audioBlockSize = 512;
+#define AUDIOBLOCKSIZE 128
+
+float audioOutBuffer[AUDIOBLOCKSIZE];
 unsigned long audioFrame = 0;
 int blockPos = 0;
 
@@ -70,55 +72,12 @@ int frame = 0;
 uint16_t buf_len = 1024;
 char buf[1024];
 
-QueueHandle_t xQueueToDSP;
-QueueHandle_t xQueueFromDSP;
-
-void coreTask( void * pvParameters ) {
-
-  String taskMessage = "Core task running on core ";
-  taskMessage = taskMessage + xPortGetCoreID();
-  Serial.println(taskMessage);
-  float data;
-  while (true) {
-    if (xQueueReceive( xQueueToDSP, &data, 0))
-    {
-      //      Serial.println(data);
-      //      data = filt.lores(data, 500, 1);
-      data *= 0.2;
-      //      if (xQueueSendToFront(xQueueFromDSP, &data, portTICK_PERIOD_MS) != pdPASS) {
-      //        Serial.println("xQueueFromDSP send failed");
-      //      } else {
-      //        Serial.println("Queue send ok");
-      //      }
-
-    } else {
-      //      Serial.println("queue fail");
-    }
-  }
-
-}
-
-void dspReceiver( void * pvParameters ) {
-  String taskMessage = "dspReceiver running on core ";
-  taskMessage = taskMessage + xPortGetCoreID();
-  Serial.println(taskMessage);
-  float data;
-  while (true) {
-    //    if (xQueueReceive( xQueueFromDSP, &data, 0))
-    //    {
-    //      Serial.println(data);
-    //    } else {
-    //      Serial.println("queue fail");
-    //    }
-    delay(1);
-  }
-
-}
 
 void mainLoop( void * pvParameters ) {
   String taskMessage = "Main loop task running on core ";
   taskMessage = taskMessage + xPortGetCoreID();
   Serial.println(taskMessage);
+  Serial.println("Finding a listening mirrors server...");
   while (1) {
     //    Serial.println(netState);
     //    delay(0.1);
@@ -129,11 +88,14 @@ void mainLoop( void * pvParameters ) {
       case WAITING_FOR_ADVERT:
         {
           int udpMsgLength = udp.parsePacket();
+          //          Serial.println("Parsing packet");
+          //          Serial.println(udpMsgLength);
           if (udpMsgLength != 0) {
             byte udpPacket[udpMsgLength + 1];
             udp.read(udpPacket, udpMsgLength);
             udpPacket[udpMsgLength] = 0;
             udp.flush(); // empty UDP buffer for next packet
+            udp.stop();
             String advMessage = String((char*)udpPacket);
             Serial.println("Received: " + advMessage);
             if (advMessage == "%groundControlTo?") {
@@ -148,10 +110,23 @@ void mainLoop( void * pvParameters ) {
                 tcpClient.print((char)0);
                 tcpClient.print('\n');
                 uint8_t data[2];
-                tcpClient.read(data, 2);
+                tcpClient.read(&data[0], 2);
                 Serial.println((char *)data);
-                //              udpStreamOut.begin(LMServerIP, STREAM_SOURCE_PORT);
                 Serial.println("Sending audio...");
+                Serial.println("Requesting an audio stream destination");
+                if (tcpClient.connect(LMServerIP, CONTROL_SERVICE_PORT)) {
+                  tcpClient.print((char)RECEIVEREQ);
+                  tcpClient.print((char)0);
+                  tcpClient.print((char)0);
+                  tcpClient.print((char)0);
+                  tcpClient.print('\n');
+                  uint8_t data[2];
+                  tcpClient.read(&data[0], 2);
+                  Serial.println((char*)data);
+                  Serial.println("Receiving audio...");
+                } else {
+                  Serial.println("Can't connect to LM Server control service");
+                }
                 netState = CONNECTED;
               } else {
                 Serial.println("Can't connect to LM Server control service");
@@ -172,55 +147,102 @@ void mainLoop( void * pvParameters ) {
 
           uint32_t samples_read = bytes_read  / (I2S_BITS_PER_SAMPLE_32BIT / 8);
 
-          Serial.println(samples_read);
+          //          if (samples_read > 0) {
+          //            Serial.println(samples_read);
+          //          } else {
+          //            Serial.print(".");
+          //          }
 
           int32_t *intPtr = (int32_t*) &buf[0];
           for (int i = 0; i < samples_read; i += 2) {
             float w = intPtr[i] / (float) 0x7fffffff;
             w = w * 50.f;
             w = dcblock.play(w, 0.99f);
-            w = dl.dl(w, 1000, 0.5);
-//            w = verb.play(w);
-//            w = compressor.compress(w);
-//            w = w + osc.saw(300.f + (200.0f * osc2.sinewave(0.2)));
+            //            w = compressor.compress(w);
+            //            w = w + osc.saw(300.f + (200.0f * osc2.sinewave(0.2)));
 
             //        w = osc.saw(100);
             //            w = filt.lores(w, 300, 1);
             //    mean += w;
             //    w *= 0.05f;
 
-//            w = svf.play(w, 1.f, 0.f, 0.f, 0.f);
+            //            w = svf.play(w, 1.f, 0.f, 0.f, 0.f);
             audioOutBuffer[blockPos] = w ;
             blockPos++;
-            if (blockPos == audioBlockSize) {
+            if (blockPos == AUDIOBLOCKSIZE) {
               blockPos = 0;
-              udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
-              udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * audioBlockSize);
-              if (!udpStreamOut.endPacket()) {
-                Serial.print("Error");
+              int beginPacketResult = udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
+              if (beginPacketResult) {
+                size_t udpWriteResult = udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * AUDIOBLOCKSIZE);
+                if (!udpStreamOut.endPacket()) {
+                  Serial.print("Error");
+                } else {
+                  //                  Serial.println("Audio sent");
+                }
+              } else {
+                Serial.println("Error beginning udp packet");
               }
-              //            Serial.println("send");
             }
 
-            //    if (i == 0) {
-            //      Serial.println(w);
-            //    }
             intPtr[i] = int32_t(w * (float)0x7fffffff);
           }
-          //  Serial.println(mean / samples_read);
-          //    Serial.println(intPtr[0]);
 
-
-          size_t m_bytesWritten;
-          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&buf, bytes_read, &m_bytesWritten, 0);
-          if (err != ESP_OK) {
-            Serial.print("ESP32 Errorcode ");
-            Serial.println(err);
-          }
+          //          size_t m_bytesWritten;
+          //          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&buf, bytes_read, &m_bytesWritten, 0);
+          //          if (err != ESP_OK) {
+          //            Serial.print("ESP32 Errorcode ");
+          //            Serial.println(err);
+          //          }
         }
         break;
 
     };
+  }
+}
+
+
+
+
+void netReceiveLoop( void * pvParameters ) {
+  int32_t outBuf[512];
+  Serial.println("Net receive loop started");
+  if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
+    while (1) {
+      //      Serial.print("p");
+      if (netState == CONNECTED) {
+        int udpMsgLength = udpStreamIn.parsePacket();
+        //        Serial.println(udpMsgLength);
+        if (udpMsgLength != 0) {
+          Serial.print("Rx: ");
+          Serial.println(udpMsgLength);
+          byte udpPacket[udpMsgLength];
+          udpStreamIn.read(udpPacket, udpMsgLength);
+          //          udpPacket[udpMsgLength] = 0;
+
+          //output to DAC
+          float *sampleBuf = (float*) &udpPacket[0];
+          int nSamples = udpMsgLength / sizeof(float);
+          Serial.println(nSamples);
+          for (int i = 0; i < nSamples; i++) {
+            outBuf[i*2] = outBuf[(i*2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
+            //            outBuf[i] = 0;
+          }
+          size_t m_bytesWritten;
+          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * nSamples * sizeof(int32_t), &m_bytesWritten, 0);
+          if (err != ESP_OK) {
+            Serial.print("ESP32 Errorcode ");
+            Serial.println(err);
+          }
+          udpStreamIn.flush(); // empty UDP buffer for next packet
+
+        }
+      }
+      delay(0.001);
+    }
+
+  } else {
+    Serial.println("Could not initalise udpStreamIn");
+
   }
 }
 
@@ -232,28 +254,9 @@ void setup() {
   compressor.setRatio(3);
 
 
-  //  xQueueToDSP = xQueueCreate( 1024, sizeof(float));
-  //
-  //  if ( xQueueToDSP == NULL )
-  //  {
-  //    Serial.println("Could not create xQueueToDSP");
-  //  }
-  //  else
-  //  {
-  //    Serial.println("xQueueToDSP created");
-  //  }
-  //  xQueueFromDSP = xQueueCreate( 1024, sizeof(float));
-  //  if ( xQueueFromDSP == NULL )
-  //  {
-  //    Serial.println("Could not create xQueueFromDSP");
-  //  }
-  //  else
-  //  {
-  //    Serial.println("xQueueFromDSP created");
-  //  }
   maxiSettings::setup(44100, 1,  64);
-//  svf.setCutoff(3000);
-//  svf.setResonance(10);
+  //  svf.setCutoff(3000);
+  //  svf.setResonance(10);
 
   i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -312,7 +315,7 @@ void setup() {
   }
 
 
-  for (int i = 0; i < audioBlockSize; i++) {
+  for (int i = 0; i < AUDIOBLOCKSIZE; i++) {
     audioOutBuffer[i] = 0.0;
   }
   netState = DISCONNECTED;
@@ -341,30 +344,6 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   BaseType_t taskErr;
-  //  taskErr = xTaskCreatePinnedToCore(
-  //              coreTask,   /* Function to implement the task */
-  //              "coreTask", /* Name of the task */
-  //              10000,      /* Stack size in words */
-  //              NULL,       /* Task input parameter */
-  //              1,          /* Priority of the task */
-  //              NULL,       /* Task handle. */
-  //              1);
-  //  if (taskErr != pdPASS) {
-  //    Serial.println("Error creating task: " + taskErr);
-  //  }
-  //
-  //  taskErr = xTaskCreatePinnedToCore(
-  //              dspReceiver,   /* Function to implement the task */
-  //              "dspReceiver", /* Name of the task */
-  //              10000,      /* Stack size in words */
-  //              NULL,       /* Task input parameter */
-  //              1,          /* Priority of the task */
-  //              NULL,       /* Task handle. */
-  //              1);  /* Core where the task should run */
-
-  //  if (taskErr != pdPASS) {
-  //    Serial.println("Error creating task: " + taskErr);
-  //  }
 
   taskErr = xTaskCreatePinnedToCore(
               mainLoop,   /* Function to implement the task */
@@ -379,6 +358,18 @@ void setup() {
     Serial.println("Error creating main loop task: " + taskErr);
   }
 
+  taskErr = xTaskCreatePinnedToCore(
+              netReceiveLoop,   /* Function to implement the task */
+              "netReceiveLoop", /* Name of the task */
+              8192 * 2,    /* Stack size in words */
+              NULL,       /* Task input parameter */
+              configMAX_PRIORITIES - 1,        /* Priority of the task */
+              NULL,       /* Task handle. */
+              1);  /* Core where the task should run */
+
+  if (taskErr != pdPASS) {
+    Serial.println("Error creating netReceiveLoop task: " + taskErr);
+  }
 
 }
 
