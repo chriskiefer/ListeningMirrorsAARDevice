@@ -175,9 +175,10 @@ void mainLoop( void * pvParameters ) {
               if (beginPacketResult) {
                 size_t udpWriteResult = udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * AUDIOBLOCKSIZE);
                 if (!udpStreamOut.endPacket()) {
-                  Serial.print("Error");
-                } else {
-                  //                  Serial.println("Audio sent");
+                  Serial.print("udpStreamOut Error");
+                }
+                else {
+//                  Serial.println("Audio sent");
                 }
               } else {
                 Serial.println("Error beginning udp packet");
@@ -211,10 +212,10 @@ void netReceiveLoop( void * pvParameters ) {
       //      Serial.print("p");
       if (netState == CONNECTED) {
         int udpMsgLength = udpStreamIn.parsePacket();
-        //        Serial.println(udpMsgLength);
+        //                Serial.println(udpMsgLength);
         if (udpMsgLength != 0) {
-          Serial.print("Rx: ");
-          Serial.println(udpMsgLength);
+//          Serial.print("Rx: ");
+//          Serial.println(udpMsgLength);
           byte udpPacket[udpMsgLength];
           udpStreamIn.read(udpPacket, udpMsgLength);
           //          udpPacket[udpMsgLength] = 0;
@@ -222,9 +223,9 @@ void netReceiveLoop( void * pvParameters ) {
           //output to DAC
           float *sampleBuf = (float*) &udpPacket[0];
           int nSamples = udpMsgLength / sizeof(float);
-          Serial.println(nSamples);
+          //           Serial.println(nSamples);
           for (int i = 0; i < nSamples; i++) {
-            outBuf[i*2] = outBuf[(i*2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
+            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
             //            outBuf[i] = 0;
           }
           size_t m_bytesWritten;
