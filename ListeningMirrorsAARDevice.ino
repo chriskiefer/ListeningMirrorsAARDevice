@@ -21,7 +21,7 @@ const int RECEIVEREQ = 18;
 //const char * udpAddress = "192.168.0.255";
 const int udpAdvPort = 13252;
 const int UDP_PORT = 13251;
-const unsigned int CONTROL_SERVICE_PORT = 14672;
+const uint16_t CONTROL_SERVICE_PORT = 14672;
 const char CONTROL_SERVICE_REPLY = 174;
 const unsigned int STREAM_TARGET_PORT = 17232;
 const unsigned int STREAM_SOURCE_PORT = 17233;
@@ -37,11 +37,11 @@ uint8_t m_DOUT = 0; // Data Out
 i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 
 WiFiUDP udp, udpStreamOut, udpStreamIn;
-enum networkState {DISCONNECTED, CONNECTING, WAITING_FOR_ADVERT, CONNECTED} netState;
+enum networkState {DISCONNECTED, CONNECTING, WAITING_FOR_ADVERT, WAITING_FOR_GIVE_REQ, WAITING_FOR_RECEIVE_REQ, CONNECTED} netState;
 boolean connected = false;
 IPAddress LMServerIP;
 
-#define AUDIOBLOCKSIZE 128
+#define AUDIOBLOCKSIZE 256
 
 float audioOutBuffer[AUDIOBLOCKSIZE];
 unsigned long audioFrame = 0;
@@ -72,8 +72,17 @@ int frame = 0;
 uint16_t buf_len = 1024;
 char buf[1024];
 
+const float maxAmp32 = (float) 0x7fffffff;
+WiFiClient tcpClient;
+
+struct streamRequest {
+  enum streamTypes {GIVE = 17, RECEIVE, EXIT} streamType;
+  char endRequest = '\n';
+  streamRequest(streamTypes T = streamTypes::RECEIVE) : streamType(T) {}
+};
 
 void mainLoop( void * pvParameters ) {
+  //  int32_t outBuf[512];
   String taskMessage = "Main loop task running on core ";
   taskMessage = taskMessage + xPortGetCoreID();
   Serial.println(taskMessage);
@@ -94,48 +103,73 @@ void mainLoop( void * pvParameters ) {
             byte udpPacket[udpMsgLength + 1];
             udp.read(udpPacket, udpMsgLength);
             udpPacket[udpMsgLength] = 0;
-            udp.flush(); // empty UDP buffer for next packet
-            udp.stop();
             String advMessage = String((char*)udpPacket);
             Serial.println("Received: " + advMessage);
             if (advMessage == "%groundControlTo?") {
               LMServerIP = udp.remoteIP();
               Serial.println("Server found, address: " + LMServerIP.toString());
               Serial.println("Requesting an audio stream destination");
-              WiFiClient tcpClient;
               if (tcpClient.connect(LMServerIP, CONTROL_SERVICE_PORT)) {
-                tcpClient.print((char)GIVEREQ);
-                tcpClient.print((char)0);
-                tcpClient.print((char)0);
-                tcpClient.print((char)0);
-                tcpClient.print('\n');
-                uint8_t data[2];
-                tcpClient.read(&data[0], 2);
-                Serial.println((char *)data);
-                Serial.println("Sending audio...");
-                Serial.println("Requesting an audio stream destination");
-                if (tcpClient.connect(LMServerIP, CONTROL_SERVICE_PORT)) {
-                  tcpClient.print((char)RECEIVEREQ);
-                  tcpClient.print((char)0);
-                  tcpClient.print((char)0);
-                  tcpClient.print((char)0);
-                  tcpClient.print('\n');
-                  uint8_t data[2];
-                  tcpClient.read(&data[0], 2);
-                  Serial.println((char*)data);
-                  Serial.println("Receiving audio...");
-                } else {
-                  Serial.println("Can't connect to LM Server control service");
-                }
-                netState = CONNECTED;
+                streamRequest reqData(streamRequest::GIVE);
+                tcpClient.write((uint8_t*)&reqData, sizeof(streamRequest));
+                //                tcpClient.print('\n');
+                Serial.println("Sent control request, waiting for response...");
+                netState = WAITING_FOR_GIVE_REQ;
+              } else {
+                Serial.println("Can't connect to LM Server control service");
+              }
+            }
+            udp.flush();
+            udp.stop();
+          }
+          delay(100);
+        }
+        break;
+      case WAITING_FOR_GIVE_REQ:
+        {
+          if (tcpClient.available()) {
+            uint8_t data[2];
+            tcpClient.read(&data[0], 2);
+            Serial.println("Received give req response");
+            Serial.print((char) data[0]);
+            Serial.println((char) data[1]);
+            if (data[0] == 'O' && data[1] == 'K') {
+              Serial.println("Sending audio...");
+              Serial.println("Requesting an audio stream source");
+              tcpClient.stop();
+              if (tcpClient.connect(LMServerIP, CONTROL_SERVICE_PORT)) {
+                streamRequest reqData(streamRequest::RECEIVE);
+                tcpClient.write((uint8_t*)&reqData, sizeof(streamRequest));
+                netState = WAITING_FOR_RECEIVE_REQ;
+
               } else {
                 Serial.println("Can't connect to LM Server control service");
               }
             }
           }
           delay(100);
+          break;
         }
-        break;
+      case WAITING_FOR_RECEIVE_REQ:
+        {
+          if (tcpClient.available()) {
+            uint8_t data[2];
+            tcpClient.read(&data[0], 2);
+            Serial.println("Received receive req response");
+            Serial.print((char) data[0]);
+            Serial.println((char) data[1]);
+            if (data[0] == 'O' && data[1] == 'K') {
+              Serial.println("Starting to stream");
+              netState = CONNECTED;
+            }
+            //                if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
+            //                } else {
+            //                  Serial.println("Error opening udpStreamIn");
+            //                }
+          }
+          delay(100);
+          break;
+        }
       case CONNECTED:
         {
           size_t bytes_read;
@@ -147,17 +181,22 @@ void mainLoop( void * pvParameters ) {
 
           uint32_t samples_read = bytes_read  / (I2S_BITS_PER_SAMPLE_32BIT / 8);
 
-          //          if (samples_read > 0) {
-          //            Serial.println(samples_read);
-          //          } else {
-          //            Serial.print(".");
-          //          }
+//                    if (samples_read > 0) {
+//                      Serial.println(samples_read);
+//                    } else {
+//                      Serial.print(".");
+//                    }
 
           int32_t *intPtr = (int32_t*) &buf[0];
           for (int i = 0; i < samples_read; i += 2) {
-            float w = intPtr[i] / (float) 0x7fffffff;
-            w = w * 50.f;
+            float w = intPtr[i] / maxAmp32;
+            float w2 = intPtr[i + 1] / maxAmp32;
+            w = w + w2;
+            //            w = w * 10.f;
             w = dcblock.play(w, 0.99f);
+            //            if (i==0)
+            //              Serial.println(w);
+            w = w * 10.0f;
             //            w = compressor.compress(w);
             //            w = w + osc.saw(300.f + (200.0f * osc2.sinewave(0.2)));
 
@@ -178,7 +217,7 @@ void mainLoop( void * pvParameters ) {
                   Serial.print("udpStreamOut Error");
                 }
                 else {
-//                  Serial.println("Audio sent");
+//                                                      Serial.println("Audio sent");
                 }
               } else {
                 Serial.println("Error beginning udp packet");
@@ -194,11 +233,16 @@ void mainLoop( void * pvParameters ) {
           //            Serial.print("ESP32 Errorcode ");
           //            Serial.println(err);
           //          }
+
+
+
         }
         break;
 
     };
-  }
+    taskYIELD();
+
+  } // end of loop
 }
 
 
@@ -214,8 +258,8 @@ void netReceiveLoop( void * pvParameters ) {
         int udpMsgLength = udpStreamIn.parsePacket();
         //                Serial.println(udpMsgLength);
         if (udpMsgLength != 0) {
-//          Serial.print("Rx: ");
-//          Serial.println(udpMsgLength);
+          //          Serial.print("Rx: ");
+          //          Serial.println(udpMsgLength);
           byte udpPacket[udpMsgLength];
           udpStreamIn.read(udpPacket, udpMsgLength);
           //          udpPacket[udpMsgLength] = 0;
@@ -238,8 +282,9 @@ void netReceiveLoop( void * pvParameters ) {
 
         }
       }
-      delay(0.001);
-    }
+      //      delay(0.001);
+      taskYIELD();
+    } // end of loop
 
   } else {
     Serial.println("Could not initalise udpStreamIn");
@@ -307,12 +352,10 @@ void setup() {
   esp_err_t err = i2s_driver_install(I2S_PORT_MIC, &i2s_config_microphone, 0, NULL);
   if (err != ESP_OK) {
     Serial.printf("Failed installing driver: %d\n", err);
-    while (true);
   }
   err = i2s_set_pin(I2S_PORT_MIC, &pin_config_mic);
   if (err != ESP_OK) {
     Serial.printf("Failed setting pin: %d\n", err);
-    while (true);
   }
 
 
@@ -349,7 +392,7 @@ void setup() {
   taskErr = xTaskCreatePinnedToCore(
               mainLoop,   /* Function to implement the task */
               "mainLoop", /* Name of the task */
-              8192 * 2,    /* Stack size in words */
+              8192,    /* Stack size in words */
               NULL,       /* Task input parameter */
               configMAX_PRIORITIES - 1,        /* Priority of the task */
               NULL,       /* Task handle. */
@@ -362,7 +405,7 @@ void setup() {
   taskErr = xTaskCreatePinnedToCore(
               netReceiveLoop,   /* Function to implement the task */
               "netReceiveLoop", /* Name of the task */
-              8192 * 2,    /* Stack size in words */
+              8192,    /* Stack size in words */
               NULL,       /* Task input parameter */
               configMAX_PRIORITIES - 1,        /* Priority of the task */
               NULL,       /* Task handle. */
@@ -371,6 +414,8 @@ void setup() {
   if (taskErr != pdPASS) {
     Serial.println("Error creating netReceiveLoop task: " + taskErr);
   }
+
+
 
 }
 
