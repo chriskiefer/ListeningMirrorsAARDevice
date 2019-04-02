@@ -2,6 +2,7 @@
 #include <WiFiUdp.h>
 #include "driver/i2s.h"
 #include "maxi.h"
+#include "freertos/ringbuf.h"
 
 maxiFilter filt;
 maxiOsc osc, osc2;
@@ -33,6 +34,7 @@ uint8_t m_i2s_num = I2S_NUM_0;
 uint8_t         m_BCLK = 0;                     // Bit Clock
 uint8_t         m_LRC = 0;                      // Left/Right Clock
 uint8_t m_DOUT = 0; // Data Out
+RingbufHandle_t recvRing;
 
 i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 
@@ -41,7 +43,7 @@ enum networkState {DISCONNECTED, CONNECTING, WAITING_FOR_ADVERT, WAITING_FOR_GIV
 boolean connected = false;
 IPAddress LMServerIP;
 
-#define AUDIOBLOCKSIZE 256
+#define AUDIOBLOCKSIZE 128
 
 float audioOutBuffer[AUDIOBLOCKSIZE];
 unsigned long audioFrame = 0;
@@ -82,7 +84,7 @@ struct streamRequest {
 };
 
 void mainLoop( void * pvParameters ) {
-  //  int32_t outBuf[512];
+  int32_t outBuf[512];
   String taskMessage = "Main loop task running on core ";
   taskMessage = taskMessage + xPortGetCoreID();
   Serial.println(taskMessage);
@@ -181,11 +183,11 @@ void mainLoop( void * pvParameters ) {
 
           uint32_t samples_read = bytes_read  / (I2S_BITS_PER_SAMPLE_32BIT / 8);
 
-//                    if (samples_read > 0) {
-//                      Serial.println(samples_read);
-//                    } else {
-//                      Serial.print(".");
-//                    }
+          //                    if (samples_read > 0) {
+          //                      Serial.println(samples_read);
+          //                    } else {
+          //                      Serial.print(".");
+          //                    }
 
           int32_t *intPtr = (int32_t*) &buf[0];
           for (int i = 0; i < samples_read; i += 2) {
@@ -196,7 +198,7 @@ void mainLoop( void * pvParameters ) {
             w = dcblock.play(w, 0.99f);
             //            if (i==0)
             //              Serial.println(w);
-            w = w * 10.0f;
+            w = w * 2.0f;
             //            w = compressor.compress(w);
             //            w = w + osc.saw(300.f + (200.0f * osc2.sinewave(0.2)));
 
@@ -217,14 +219,41 @@ void mainLoop( void * pvParameters ) {
                   Serial.print("udpStreamOut Error");
                 }
                 else {
-//                                                      Serial.println("Audio sent");
+                  //                                                      Serial.println("Audio sent");
                 }
               } else {
                 Serial.println("Error beginning udp packet");
               }
             }
 
-            intPtr[i] = int32_t(w * (float)0x7fffffff);
+            //            intPtr[i] = int32_t(w * (float)0x7fffffff);
+            //            if (samples_read > 0) {
+            //              Serial.print("ring buf: " );
+            //              Serial.println(xRingbufferGetCurFreeSize(recvRing));
+            //            } else {
+            //            }
+            //            if (samples_read > 0) {
+            float *sampleBuf;
+            size_t recvRingCount;
+            if (xRingbufferGetCurFreeSize(recvRing) < 1024) {
+              sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(1), samples_read * sizeof(float));
+              if (sampleBuf != NULL) {
+                recvRingCount /= sizeof(float);
+//                Serial.println(recvRingCount);
+
+                for (int i = 0; i < recvRingCount; i++) {
+                  outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
+                }
+                size_t m_bytesWritten;
+                esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * recvRingCount * sizeof(int32_t), &m_bytesWritten, 0);
+                if (err != ESP_OK) {
+                  Serial.print("ESP32 Errorcode ");
+                  Serial.println(err);
+                }
+                vRingbufferReturnItem(recvRing, (void*)sampleBuf);
+              }
+            }
+            //            }
           }
 
           //          size_t m_bytesWritten;
@@ -267,22 +296,22 @@ void netReceiveLoop( void * pvParameters ) {
           //output to DAC
           float *sampleBuf = (float*) &udpPacket[0];
           int nSamples = udpMsgLength / sizeof(float);
-          //           Serial.println(nSamples);
-          for (int i = 0; i < nSamples; i++) {
-            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
-            //            outBuf[i] = 0;
-          }
-          size_t m_bytesWritten;
-          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * nSamples * sizeof(int32_t), &m_bytesWritten, 0);
-          if (err != ESP_OK) {
-            Serial.print("ESP32 Errorcode ");
-            Serial.println(err);
-          }
+          xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(1));
+          //                     Serial.println(nSamples);
+          //          for (int i = 0; i < nSamples; i++) {
+          //            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
+          //            //            outBuf[i] = 0;
+          //          }
+          //          size_t m_bytesWritten;
+          //          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * nSamples * sizeof(int32_t), &m_bytesWritten, 0);
+          //          if (err != ESP_OK) {
+          //            Serial.print("ESP32 Errorcode ");
+          //            Serial.println(err);
+          //          }
           udpStreamIn.flush(); // empty UDP buffer for next packet
 
         }
       }
-      //      delay(0.001);
       taskYIELD();
     } // end of loop
 
@@ -294,6 +323,11 @@ void netReceiveLoop( void * pvParameters ) {
 
 void setup() {
   Serial.begin(115200);
+
+  recvRing = xRingbufferCreate(AUDIOBLOCKSIZE * 6 * sizeof(float), RINGBUF_TYPE_BYTEBUF);
+  if (recvRing == NULL) {
+    Serial.println("Couldn't create recvRing");
+  }
   compressor.setAttack(100);
   compressor.setRelease(100);
   compressor.setThreshold(0.8);
