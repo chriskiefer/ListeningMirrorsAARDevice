@@ -1,26 +1,29 @@
+/*
 
+  _     _  ____  _____  _____ _      _  _      _____   _      _  ____  ____  ____  ____  ____
+  / \   / \/ ___\/__ __\/  __// \  /|/ \/ \  /|/  __/  / \__/|/ \/  __\/  __\/  _ \/  __\/ ___\
+  | |   | ||    \  / \  |  \  | |\ ||| || |\ ||| |  _  | |\/||| ||  \/||  \/|| / \||  \/||    \
+  | |_/\| |\___ |  | |  |  /_ | | \||| || | \||| |_//  | |  ||| ||    /|    /| \_/||    /\___ |
+  \____/\_/\____/  \_/  \____\\_/  \|\_/\_/  \|\____\  \_/  \|\_/\_/\_\\_/\_\\____/\_/\_\\____/
+
+  Chris Kiefer and Cecile Chevalier, 2019
+
+*/
 
 #include "WiFi.h"
 #include <WiFiUdp.h>
 #include "driver/i2s.h"
 #include "maxi.h"
 #include "freertos/ringbuf.h"
-//#define NUM_LEDS 1
-//#include "ws2812_control.h"
 
 #include <Adafruit_NeoPixel.h>
 
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(2, 17, NEO_GRB + NEO_KHZ800);
 
-float masterVol = 0.5;
+float masterVol = 0.8;
 
-//maxiFilter filt;
-//maxiOsc osc, osc2;
 maxiDCBlocker dcblock;
-//maxiDelayline dl;
 
-//maxiSVF svf;
-//maxiDyn compressor;
 #define SERVER_ADVERT_STRING "%groundControlTo?"
 
 const char* ssid     = "ListeningMirrors";
@@ -29,7 +32,6 @@ const char* password = "badgersbadgers";
 
 const int GIVEREQ = 17;
 const int RECEIVEREQ = 18;
-//const char * udpAddress = "192.168.0.255";
 const int udpAdvPort = 13252;
 const int UDP_PORT = 13251;
 const uint16_t CONTROL_SERVICE_PORT = 14672;
@@ -44,7 +46,6 @@ uint8_t m_i2s_num = I2S_NUM_0;
 uint8_t         m_BCLK = 0;                     // Bit Clock
 uint8_t         m_LRC = 0;                      // Left/Right Clock
 uint8_t m_DOUT = 0; // Data Out
-RingbufHandle_t recvRing;
 
 i2s_port_t I2S_PORT_MIC = I2S_NUM_1;
 
@@ -53,17 +54,18 @@ enum networkState {DISCONNECTED, CONNECTING, WAITING_FOR_ADVERT, WAITING_FOR_GIV
 boolean connected = false;
 IPAddress LMServerIP;
 
-#define AUDIOBLOCKSIZE 128
+#define AUDIOBLOCKSIZE 256
 
 float audioOutBuffer[AUDIOBLOCKSIZE];
 unsigned long audioFrame = 0;
 int blockPos = 0;
 
-int i2s_block_size = 128;
+RingbufHandle_t recvRing;
+uint32_t recvRingSize = AUDIOBLOCKSIZE * 8 * sizeof(float);
+uint32_t recvRingSizeThreshold = (recvRingSize / 2) + 1;
+bool streamingStarted = 0;
 
-BaseType_t xStatus;
-/* time to block the task until the queue has free space */
-const TickType_t xTicksToWait = pdMS_TO_TICKS(100);
+int i2s_block_size = 128;
 
 
 void connectToAP() {
@@ -93,15 +95,10 @@ struct streamRequest {
   streamRequest(streamTypes T = streamTypes::RECEIVE) : streamType(T) {}
 };
 
-//struct led_state new_state;
-//
-//inline void setLEDColor(uint32_t color) {
-//  new_state.leds[0] = 0xFF0000;
-//  ws2812_write_leds(new_state);
-//}
+uint32_t serverAliveTimeStamp = 0;
 
 void mainLoop( void * pvParameters ) {
-  int32_t outBuf[512];
+  int32_t outBuf[1024];
   String taskMessage = "Main loop task running on core ";
   taskMessage = taskMessage + xPortGetCoreID();
   Serial.println(taskMessage);
@@ -111,6 +108,9 @@ void mainLoop( void * pvParameters ) {
     //    delay(0.1);
     switch (netState) {
       case DISCONNECTED:
+        pixels.begin();
+        pixels.setPixelColor(0, pixels.Color(0, 150, 0));
+        pixels.show();
         connectToAP();
         break;
       case WAITING_FOR_ADVERT:
@@ -185,7 +185,9 @@ void mainLoop( void * pvParameters ) {
             Serial.println((char) data[1]);
             if (data[0] == 'O' && data[1] == 'K') {
               Serial.println("Starting to stream");
+              streamingStarted = 0;
               netState = CONNECTED;
+              serverAliveTimeStamp = millis();
               pixels.setPixelColor(0, pixels.Color(10, 255, 255));
               pixels.show();
             }
@@ -260,8 +262,8 @@ void mainLoop( void * pvParameters ) {
             //            if (samples_read > 0) {
             float *sampleBuf;
             size_t recvRingCount;
-            if (xRingbufferGetCurFreeSize(recvRing) < 1024) {
-              sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(1), samples_read * sizeof(float));
+            if (xRingbufferGetCurFreeSize(recvRing) <= 3072) {
+              sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(0), samples_read  * sizeof(float));
               if (sampleBuf != NULL) {
                 recvRingCount /= sizeof(float);
                 //                Serial.println(recvRingCount);
@@ -269,17 +271,16 @@ void mainLoop( void * pvParameters ) {
                 for (int i = 0; i < recvRingCount; i++) {
                   outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
                 }
+                vRingbufferReturnItem(recvRing, (void*)sampleBuf);
                 size_t m_bytesWritten;
                 esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * recvRingCount * sizeof(int32_t), &m_bytesWritten, 0);
                 if (err != ESP_OK) {
                   Serial.print("ESP32 Errorcode ");
                   Serial.println(err);
                 }
-                vRingbufferReturnItem(recvRing, (void*)sampleBuf);
 
               }
             }
-            //            }
           }
 
           //          size_t m_bytesWritten;
@@ -304,7 +305,7 @@ void mainLoop( void * pvParameters ) {
 
 
 void netReceiveLoop( void * pvParameters ) {
-  int32_t outBuf[512];
+  //  int32_t outBuf[512];
   Serial.println("Net receive thread waiting");
   if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
     while (1) {
@@ -322,8 +323,8 @@ void netReceiveLoop( void * pvParameters ) {
           //output to DAC
           float *sampleBuf = (float*) &udpPacket[0];
           int nSamples = udpMsgLength / sizeof(float);
-          xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(1));
-
+          xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(2));
+          serverAliveTimeStamp = millis();
           //                     Serial.println(nSamples);
           //          for (int i = 0; i < nSamples; i++) {
           //            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
@@ -338,6 +339,13 @@ void netReceiveLoop( void * pvParameters ) {
           udpStreamIn.flush(); // empty UDP buffer for next packet
 
         }
+        uint32_t now = millis();
+        uint32_t gap = now - serverAliveTimeStamp;
+        if (gap > 2000) {
+          Serial.println("Lost the server, restarting");
+          ESP.restart();
+        }
+
       }
       taskYIELD();
     } // end of loop
@@ -350,33 +358,33 @@ void netReceiveLoop( void * pvParameters ) {
 
 int lastAmpVal = 0;
 void ampReadLoop( void * pvParameters ) {
-//  Serial.println
   while (1) {
     int val = analogRead(A6);
     if (val != lastAmpVal) {
       masterVol = powf(val / 4095.0f, 2.f);
       lastAmpVal = val;
-//      Serial.print("Amp: ");
-//      Serial.println(masterVol);
+      //      Serial.print("Amp: ");
+      //      Serial.println(masterVol);
     };
     delay(100);
   }
 }
 
+
 void setup() {
   Serial.begin(115200);
   pixels.begin();
-  pixels.setPixelColor(0, pixels.Color(0, 150, 0));
+  pixels.setPixelColor(0, pixels.Color(0, 50, 0));
   pixels.show();
 
-  recvRing = xRingbufferCreate(AUDIOBLOCKSIZE * 6 * sizeof(float), RINGBUF_TYPE_BYTEBUF);
+  recvRing = xRingbufferCreate(recvRingSize, RINGBUF_TYPE_BYTEBUF);
   if (recvRing == NULL) {
     Serial.println("Couldn't create recvRing");
   }
-//  compressor.setAttack(100);
-//  compressor.setRelease(100);
-//  compressor.setThreshold(0.8);
-//  compressor.setRatio(3);
+  //  compressor.setAttack(100);
+  //  compressor.setRelease(100);
+  //  compressor.setThreshold(0.8);
+  //  compressor.setRatio(3);
 
 
   maxiSettings::setup(44100, 1,  64);
@@ -499,15 +507,13 @@ void setup() {
               "ampReadLoop", /* Name of the task */
               8192,    /* Stack size in words */
               NULL,       /* Task input parameter */
-              configMAX_PRIORITIES - 2,        /* Priority of the task */
+              1,        /* Priority of the task */
               NULL,       /* Task handle. */
               1);  /* Core where the task should run */
 
   if (taskErr != pdPASS) {
     Serial.println("Error creating ampReadLoop task: " + taskErr);
   }
-
-
 
 }
 
