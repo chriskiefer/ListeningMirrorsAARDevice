@@ -14,13 +14,13 @@ Adafruit_NeoPixel pixels = Adafruit_NeoPixel(2, 17, NEO_GRB + NEO_KHZ800);
 
 float masterVol = 0.5;
 
-maxiFilter filt;
-maxiOsc osc, osc2;
+//maxiFilter filt;
+//maxiOsc osc, osc2;
 maxiDCBlocker dcblock;
-maxiDelayline dl;
+//maxiDelayline dl;
 
 //maxiSVF svf;
-maxiDyn compressor;
+//maxiDyn compressor;
 #define SERVER_ADVERT_STRING "%groundControlTo?"
 
 const char* ssid     = "ListeningMirrors";
@@ -365,8 +365,6 @@ void ampReadLoop( void * pvParameters ) {
 
 void setup() {
   Serial.begin(115200);
-  //  ws2812_control_init();
-  //  setLEDColor(0x0000FF);
   pixels.begin();
   pixels.setPixelColor(0, pixels.Color(0, 150, 0));
   pixels.show();
@@ -375,10 +373,10 @@ void setup() {
   if (recvRing == NULL) {
     Serial.println("Couldn't create recvRing");
   }
-  compressor.setAttack(100);
-  compressor.setRelease(100);
-  compressor.setThreshold(0.8);
-  compressor.setRatio(3);
+//  compressor.setAttack(100);
+//  compressor.setRelease(100);
+//  compressor.setThreshold(0.8);
+//  compressor.setRatio(3);
 
 
   maxiSettings::setup(44100, 1,  64);
