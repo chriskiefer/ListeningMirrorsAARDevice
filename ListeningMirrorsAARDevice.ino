@@ -1,8 +1,16 @@
+
+
 #include "WiFi.h"
 #include <WiFiUdp.h>
 #include "driver/i2s.h"
 #include "maxi.h"
 #include "freertos/ringbuf.h"
+//#define NUM_LEDS 1
+//#include "ws2812_control.h"
+
+#include <Adafruit_NeoPixel.h>
+
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(2, 17, NEO_GRB + NEO_KHZ800);
 
 maxiFilter filt;
 maxiOsc osc, osc2;
@@ -83,6 +91,13 @@ struct streamRequest {
   streamRequest(streamTypes T = streamTypes::RECEIVE) : streamType(T) {}
 };
 
+//struct led_state new_state;
+//
+//inline void setLEDColor(uint32_t color) {
+//  new_state.leds[0] = 0xFF0000;
+//  ws2812_write_leds(new_state);
+//}
+
 void mainLoop( void * pvParameters ) {
   int32_t outBuf[512];
   String taskMessage = "Main loop task running on core ";
@@ -98,6 +113,8 @@ void mainLoop( void * pvParameters ) {
         break;
       case WAITING_FOR_ADVERT:
         {
+          pixels.setPixelColor(0, pixels.Color(255, 0, 0));
+          pixels.show();
           int udpMsgLength = udp.parsePacket();
           //          Serial.println("Parsing packet");
           //          Serial.println(udpMsgLength);
@@ -129,6 +146,8 @@ void mainLoop( void * pvParameters ) {
         break;
       case WAITING_FOR_GIVE_REQ:
         {
+          pixels.setPixelColor(0, pixels.Color(0, 0, 255));
+          pixels.show();
           if (tcpClient.available()) {
             uint8_t data[2];
             tcpClient.read(&data[0], 2);
@@ -154,6 +173,8 @@ void mainLoop( void * pvParameters ) {
         }
       case WAITING_FOR_RECEIVE_REQ:
         {
+          pixels.setPixelColor(0, pixels.Color(255, 0, 255));
+          pixels.show();
           if (tcpClient.available()) {
             uint8_t data[2];
             tcpClient.read(&data[0], 2);
@@ -163,6 +184,8 @@ void mainLoop( void * pvParameters ) {
             if (data[0] == 'O' && data[1] == 'K') {
               Serial.println("Starting to stream");
               netState = CONNECTED;
+              pixels.setPixelColor(0, pixels.Color(10, 255, 255));
+              pixels.show();
             }
             //                if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
             //                } else {
@@ -239,7 +262,7 @@ void mainLoop( void * pvParameters ) {
               sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(1), samples_read * sizeof(float));
               if (sampleBuf != NULL) {
                 recvRingCount /= sizeof(float);
-//                Serial.println(recvRingCount);
+                //                Serial.println(recvRingCount);
 
                 for (int i = 0; i < recvRingCount; i++) {
                   outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
@@ -251,6 +274,7 @@ void mainLoop( void * pvParameters ) {
                   Serial.println(err);
                 }
                 vRingbufferReturnItem(recvRing, (void*)sampleBuf);
+
               }
             }
             //            }
@@ -279,7 +303,7 @@ void mainLoop( void * pvParameters ) {
 
 void netReceiveLoop( void * pvParameters ) {
   int32_t outBuf[512];
-  Serial.println("Net receive loop started");
+  Serial.println("Net receive thread waiting");
   if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
     while (1) {
       //      Serial.print("p");
@@ -297,6 +321,7 @@ void netReceiveLoop( void * pvParameters ) {
           float *sampleBuf = (float*) &udpPacket[0];
           int nSamples = udpMsgLength / sizeof(float);
           xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(1));
+
           //                     Serial.println(nSamples);
           //          for (int i = 0; i < nSamples; i++) {
           //            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
@@ -323,6 +348,11 @@ void netReceiveLoop( void * pvParameters ) {
 
 void setup() {
   Serial.begin(115200);
+  //  ws2812_control_init();
+  //  setLEDColor(0x0000FF);
+  pixels.begin();
+  pixels.setPixelColor(0, pixels.Color(0, 150, 0));
+  pixels.show();
 
   recvRing = xRingbufferCreate(AUDIOBLOCKSIZE * 6 * sizeof(float), RINGBUF_TYPE_BYTEBUF);
   if (recvRing == NULL) {
