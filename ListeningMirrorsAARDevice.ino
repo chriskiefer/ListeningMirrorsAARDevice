@@ -12,6 +12,8 @@
 
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(2, 17, NEO_GRB + NEO_KHZ800);
 
+float masterVol = 0.5;
+
 maxiFilter filt;
 maxiOsc osc, osc2;
 maxiDCBlocker dcblock;
@@ -221,7 +223,7 @@ void mainLoop( void * pvParameters ) {
             w = dcblock.play(w, 0.99f);
             //            if (i==0)
             //              Serial.println(w);
-            w = w * 2.0f;
+            w = w * 1.0f;
             //            w = compressor.compress(w);
             //            w = w + osc.saw(300.f + (200.0f * osc2.sinewave(0.2)));
 
@@ -265,7 +267,7 @@ void mainLoop( void * pvParameters ) {
                 //                Serial.println(recvRingCount);
 
                 for (int i = 0; i < recvRingCount; i++) {
-                  outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
+                  outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
                 }
                 size_t m_bytesWritten;
                 esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * recvRingCount * sizeof(int32_t), &m_bytesWritten, 0);
@@ -343,6 +345,21 @@ void netReceiveLoop( void * pvParameters ) {
   } else {
     Serial.println("Could not initalise udpStreamIn");
 
+  }
+}
+
+int lastAmpVal = 0;
+void ampReadLoop( void * pvParameters ) {
+//  Serial.println
+  while (1) {
+    int val = analogRead(A6);
+    if (val != lastAmpVal) {
+      masterVol = powf(val / 4095.0f, 2.f);
+      lastAmpVal = val;
+//      Serial.print("Amp: ");
+//      Serial.println(masterVol);
+    };
+    delay(100);
   }
 }
 
@@ -477,6 +494,19 @@ void setup() {
 
   if (taskErr != pdPASS) {
     Serial.println("Error creating netReceiveLoop task: " + taskErr);
+  }
+
+  taskErr = xTaskCreatePinnedToCore(
+              ampReadLoop,   /* Function to implement the task */
+              "ampReadLoop", /* Name of the task */
+              8192,    /* Stack size in words */
+              NULL,       /* Task input parameter */
+              configMAX_PRIORITIES - 2,        /* Priority of the task */
+              NULL,       /* Task handle. */
+              1);  /* Core where the task should run */
+
+  if (taskErr != pdPASS) {
+    Serial.println("Error creating ampReadLoop task: " + taskErr);
   }
 
 
