@@ -252,7 +252,7 @@ void mainLoop( void * pvParameters ) {
                 } else {
                   Serial.println("Error beginning udp packet");
                 }
-              }else{
+              } else {
                 Serial.println("rebuffering");
               }
             }
@@ -264,26 +264,26 @@ void mainLoop( void * pvParameters ) {
             //            } else {
             //            }
             //            if (samples_read > 0) {
-            float *sampleBuf;
-            size_t recvRingCount;
-            if (xRingbufferGetCurFreeSize(recvRing) <= 3072) {
-              sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(0), samples_read  * sizeof(float));
-              if (sampleBuf != NULL) {
-                recvRingCount /= sizeof(float);
-                //                Serial.println(recvRingCount);
+          }
+          float *sampleBuf;
+          size_t recvRingCount;
+          if (xRingbufferGetCurFreeSize(recvRing) <= 3072) {
+            sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(0), samples_read  * sizeof(float));
+            if (sampleBuf != NULL) {
+              recvRingCount /= sizeof(float);
+              //                Serial.println(recvRingCount);
 
-                for (int i = 0; i < recvRingCount; i++) {
-                  outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
-                }
-                vRingbufferReturnItem(recvRing, (void*)sampleBuf);
-                size_t m_bytesWritten;
-                esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * recvRingCount * sizeof(int32_t), &m_bytesWritten, 0);
-                if (err != ESP_OK) {
-                  Serial.print("ESP32 Errorcode ");
-                  Serial.println(err);
-                }
-
+              for (int i = 0; i < recvRingCount; i++) {
+                outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
               }
+              vRingbufferReturnItem(recvRing, (void*)sampleBuf);
+              size_t m_bytesWritten;
+              esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * recvRingCount * sizeof(int32_t), &m_bytesWritten, 0);
+              if (err != ESP_OK) {
+                Serial.print("ESP32 Errorcode ");
+                Serial.println(err);
+              }
+
             }
           }
 
