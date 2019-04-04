@@ -239,17 +239,21 @@ void mainLoop( void * pvParameters ) {
             blockPos++;
             if (blockPos == AUDIOBLOCKSIZE) {
               blockPos = 0;
-              int beginPacketResult = udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
-              if (beginPacketResult) {
-                size_t udpWriteResult = udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * AUDIOBLOCKSIZE);
-                if (!udpStreamOut.endPacket()) {
-                  Serial.print("udpStreamOut Error");
+              if (xRingbufferGetCurFreeSize(recvRing) > 0) {
+                int beginPacketResult = udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
+                if (beginPacketResult) {
+                  size_t udpWriteResult = udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * AUDIOBLOCKSIZE);
+                  if (!udpStreamOut.endPacket()) {
+                    Serial.print("udpStreamOut Error");
+                  }
+                  else {
+                    //                                                      Serial.println("Audio sent");
+                  }
+                } else {
+                  Serial.println("Error beginning udp packet");
                 }
-                else {
-                  //                                                      Serial.println("Audio sent");
-                }
-              } else {
-                Serial.println("Error beginning udp packet");
+              }else{
+                Serial.println("rebuffering");
               }
             }
 
@@ -323,19 +327,23 @@ void netReceiveLoop( void * pvParameters ) {
           //output to DAC
           float *sampleBuf = (float*) &udpPacket[0];
           int nSamples = udpMsgLength / sizeof(float);
-          xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(2));
-          serverAliveTimeStamp = millis();
-          //                     Serial.println(nSamples);
-          //          for (int i = 0; i < nSamples; i++) {
-          //            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
-          //            //            outBuf[i] = 0;
-          //          }
-          //          size_t m_bytesWritten;
-          //          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * nSamples * sizeof(int32_t), &m_bytesWritten, 0);
-          //          if (err != ESP_OK) {
-          //            Serial.print("ESP32 Errorcode ");
-          //            Serial.println(err);
-          //          }
+          if (xRingbufferGetCurFreeSize(recvRing) > 0) {
+            xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(0));
+            serverAliveTimeStamp = millis();
+            //                     Serial.println(nSamples);
+            //          for (int i = 0; i < nSamples; i++) {
+            //            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
+            //            //            outBuf[i] = 0;
+            //          }
+            //          size_t m_bytesWritten;
+            //          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * nSamples * sizeof(int32_t), &m_bytesWritten, 0);
+            //          if (err != ESP_OK) {
+            //            Serial.print("ESP32 Errorcode ");
+            //            Serial.println(err);
+            //          }
+          } else {
+            Serial.println("buffer underrun");
+          }
           udpStreamIn.flush(); // empty UDP buffer for next packet
 
         }
