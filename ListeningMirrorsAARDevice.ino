@@ -24,6 +24,12 @@ float masterVol = 0.8;
 
 maxiDCBlocker dcblock;
 
+//#define TESTMODE
+
+#ifdef TESTMODE
+maxiOsc testOsc;
+#endif
+
 #define SERVER_ADVERT_STRING "%groundControlTo?"
 
 const char* ssid     = "ListeningMirrors";
@@ -61,7 +67,8 @@ unsigned long audioFrame = 0;
 int blockPos = 0;
 
 RingbufHandle_t recvRing;
-uint32_t recvRingSize = AUDIOBLOCKSIZE * 8 * sizeof(float);
+uint32_t recvRingSize = AUDIOBLOCKSIZE * 16 * sizeof(float);
+uint32_t recvRingMin = (uint32_t)recvRingSize * 0.75;
 uint32_t recvRingSizeThreshold = (recvRingSize / 2) + 1;
 bool streamingStarted = 0;
 
@@ -240,17 +247,22 @@ void mainLoop( void * pvParameters ) {
             if (blockPos == AUDIOBLOCKSIZE) {
               blockPos = 0;
               if (xRingbufferGetCurFreeSize(recvRing) > 0) {
-                int beginPacketResult = udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
-                if (beginPacketResult) {
-                  size_t udpWriteResult = udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * AUDIOBLOCKSIZE);
-                  if (!udpStreamOut.endPacket()) {
-                    Serial.print("udpStreamOut Error");
+                if (udpStreamOut.begin(STREAM_SOURCE_PORT)) {
+                  int beginPacketResult = udpStreamOut.beginPacket(LMServerIP, STREAM_SOURCE_PORT);
+                  if (beginPacketResult) {
+                    size_t udpWriteResult = udpStreamOut.write((uint8_t *) &audioOutBuffer[0], sizeof(float) * AUDIOBLOCKSIZE);
+                    if (!udpStreamOut.endPacket()) {
+                      Serial.print("udpStreamOut Error");
+                    }
+                    else {
+                      //                                                      Serial.println("Audio sent");
+                    }
+                  } else {
+                    Serial.println("Error beginning udp packet");
                   }
-                  else {
-                    //                                                      Serial.println("Audio sent");
-                  }
+                  udpStreamOut.stop();
                 } else {
-                  Serial.println("Error beginning udp packet");
+                  Serial.println("udp not opening");
                 }
               } else {
                 Serial.println("rebuffering");
@@ -267,14 +279,18 @@ void mainLoop( void * pvParameters ) {
           }
           float *sampleBuf;
           size_t recvRingCount;
-          if (xRingbufferGetCurFreeSize(recvRing) <= 3072) {
+          if (xRingbufferGetCurFreeSize(recvRing) <= recvRingSize) {
             sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(0), samples_read  * sizeof(float));
             if (sampleBuf != NULL) {
               recvRingCount /= sizeof(float);
               //                Serial.println(recvRingCount);
 
               for (int i = 0; i < recvRingCount; i++) {
+#ifdef TESTMODE
+                outBuf[i * 2] = outBuf[(i * 2) + 1] = testOsc.saw(200);
+#else                
                 outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
+#endif               
               }
               vRingbufferReturnItem(recvRing, (void*)sampleBuf);
               size_t m_bytesWritten;
@@ -510,18 +526,18 @@ void setup() {
     Serial.println("Error creating netReceiveLoop task: " + taskErr);
   }
 
-  taskErr = xTaskCreatePinnedToCore(
-              ampReadLoop,   /* Function to implement the task */
-              "ampReadLoop", /* Name of the task */
-              8192,    /* Stack size in words */
-              NULL,       /* Task input parameter */
-              1,        /* Priority of the task */
-              NULL,       /* Task handle. */
-              1);  /* Core where the task should run */
-
-  if (taskErr != pdPASS) {
-    Serial.println("Error creating ampReadLoop task: " + taskErr);
-  }
+  //  taskErr = xTaskCreatePinnedToCore(
+  //              ampReadLoop,   /* Function to implement the task */
+  //              "ampReadLoop", /* Name of the task */
+  //              8192,    /* Stack size in words */
+  //              NULL,       /* Task input parameter */
+  //              1,        /* Priority of the task */
+  //              NULL,       /* Task handle. */
+  //              1);  /* Core where the task should run */
+  //
+  //  if (taskErr != pdPASS) {
+  //    Serial.println("Error creating ampReadLoop task: " + taskErr);
+  //  }
 
 }
 
