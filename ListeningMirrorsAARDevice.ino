@@ -24,11 +24,6 @@ float masterVol = 0.8;
 
 maxiDCBlocker dcblock;
 
-//#define TESTMODE
-
-#ifdef TESTMODE
-maxiOsc testOsc;
-#endif
 
 #define SERVER_ADVERT_STRING "%groundControlTo?"
 
@@ -74,6 +69,7 @@ bool streamingStarted = 0;
 
 int i2s_block_size = 128;
 
+int lastAmpVal = 0;
 
 void connectToAP() {
   netState = CONNECTING;
@@ -191,11 +187,12 @@ void mainLoop( void * pvParameters ) {
             Serial.print((char) data[0]);
             Serial.println((char) data[1]);
             if (data[0] == 'O' && data[1] == 'K') {
+              tcpClient.stop();
               Serial.println("Starting to stream");
               streamingStarted = 0;
               netState = CONNECTED;
               serverAliveTimeStamp = millis();
-              pixels.setPixelColor(0, pixels.Color(10, 255, 255));
+              pixels.setPixelColor(0, pixels.Color(153 + random(-20, 20), 92 + random(-20, 20), 223 + random(-20, 20)));
               pixels.show();
             }
             //                if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
@@ -203,7 +200,7 @@ void mainLoop( void * pvParameters ) {
             //                  Serial.println("Error opening udpStreamIn");
             //                }
           }
-          delay(100);
+          delay(500);
           break;
         }
       case CONNECTED:
@@ -277,20 +274,19 @@ void mainLoop( void * pvParameters ) {
             //            }
             //            if (samples_read > 0) {
           }
+
+
           float *sampleBuf;
           size_t recvRingCount;
-          if (xRingbufferGetCurFreeSize(recvRing) <= recvRingSize) {
+          size_t bufFreeSpace = xRingbufferGetCurFreeSize(recvRing);
+          if (bufFreeSpace <= recvRingSize) {
             sampleBuf = (float*) xRingbufferReceiveUpTo(recvRing, &recvRingCount, pdMS_TO_TICKS(0), samples_read  * sizeof(float));
             if (sampleBuf != NULL) {
               recvRingCount /= sizeof(float);
               //                Serial.println(recvRingCount);
 
               for (int i = 0; i < recvRingCount; i++) {
-#ifdef TESTMODE
-                outBuf[i * 2] = outBuf[(i * 2) + 1] = testOsc.saw(200);
-#else                
                 outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
-#endif               
               }
               vRingbufferReturnItem(recvRing, (void*)sampleBuf);
               size_t m_bytesWritten;
@@ -301,6 +297,19 @@ void mainLoop( void * pvParameters ) {
               }
 
             }
+          } else if (bufFreeSpace == recvRingSize) {
+            Serial.println("dac: buffer underrun");
+          }
+
+
+          if (samples_read > 0) {
+            int val = analogRead(A6);
+            if (val < lastAmpVal-200 || val > lastAmpVal+200) {
+              masterVol = powf(val / 4095.0f, 2.f);
+              lastAmpVal = val;
+              Serial.print("Amp: ");
+              Serial.println(masterVol);
+            };
           }
 
           //          size_t m_bytesWritten;
@@ -331,19 +340,19 @@ void netReceiveLoop( void * pvParameters ) {
     while (1) {
       //      Serial.print("p");
       if (netState == CONNECTED) {
-        int udpMsgLength = udpStreamIn.parsePacket();
-        //                Serial.println(udpMsgLength);
-        if (udpMsgLength != 0) {
-          //          Serial.print("Rx: ");
-          //          Serial.println(udpMsgLength);
-          byte udpPacket[udpMsgLength];
-          udpStreamIn.read(udpPacket, udpMsgLength);
-          //          udpPacket[udpMsgLength] = 0;
+        if (xRingbufferGetCurFreeSize(recvRing) > 0) {
+          int udpMsgLength = udpStreamIn.parsePacket();
+          //                Serial.println(udpMsgLength);
+          if (udpMsgLength != 0) {
+            //          Serial.print("Rx: ");
+            //          Serial.println(udpMsgLength);
+            byte udpPacket[udpMsgLength];
+            udpStreamIn.read(udpPacket, udpMsgLength);
+            //          udpPacket[udpMsgLength] = 0;
 
-          //output to DAC
-          float *sampleBuf = (float*) &udpPacket[0];
-          int nSamples = udpMsgLength / sizeof(float);
-          if (xRingbufferGetCurFreeSize(recvRing) > 0) {
+            //output to DAC
+            float *sampleBuf = (float*) &udpPacket[0];
+            int nSamples = udpMsgLength / sizeof(float);
             xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(0));
             serverAliveTimeStamp = millis();
             //                     Serial.println(nSamples);
@@ -357,17 +366,18 @@ void netReceiveLoop( void * pvParameters ) {
             //            Serial.print("ESP32 Errorcode ");
             //            Serial.println(err);
             //          }
-          } else {
-            Serial.println("buffer underrun");
-          }
-          udpStreamIn.flush(); // empty UDP buffer for next packet
+            udpStreamIn.flush(); // empty UDP buffer for next packet
 
-        }
-        uint32_t now = millis();
-        uint32_t gap = now - serverAliveTimeStamp;
-        if (gap > 2000) {
-          Serial.println("Lost the server, restarting");
-          ESP.restart();
+          }
+          uint32_t now = millis();
+          uint32_t gap = now - serverAliveTimeStamp;
+          if (gap > 2000) {
+            Serial.println("Lost the server, restarting");
+            ESP.restart();
+          }
+        } else {
+          Serial.println("buffer underrun");
+          delay(0.1);
         }
 
       }
@@ -380,15 +390,15 @@ void netReceiveLoop( void * pvParameters ) {
   }
 }
 
-int lastAmpVal = 0;
 void ampReadLoop( void * pvParameters ) {
   while (1) {
     int val = analogRead(A6);
+    Serial.println(val);
     if (val != lastAmpVal) {
       masterVol = powf(val / 4095.0f, 2.f);
       lastAmpVal = val;
-      //      Serial.print("Amp: ");
-      //      Serial.println(masterVol);
+      Serial.print("Amp: ");
+      Serial.println(masterVol);
     };
     delay(100);
   }
@@ -529,9 +539,9 @@ void setup() {
   //  taskErr = xTaskCreatePinnedToCore(
   //              ampReadLoop,   /* Function to implement the task */
   //              "ampReadLoop", /* Name of the task */
-  //              8192,    /* Stack size in words */
+  //              2048,    /* Stack size in words */
   //              NULL,       /* Task input parameter */
-  //              1,        /* Priority of the task */
+  //              configMAX_PRIORITIES - 2,        /* Priority of the task */
   //              NULL,       /* Task handle. */
   //              1);  /* Core where the task should run */
   //
