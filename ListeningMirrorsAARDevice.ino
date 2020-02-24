@@ -1,3 +1,4 @@
+q
 /*
 
   _     _  ____  _____  _____ _      _  _      _____   _      _  ____  ____  ____  ____  ____
@@ -55,7 +56,7 @@ enum networkState {DISCONNECTED, CONNECTING, WAITING_FOR_ADVERT, WAITING_FOR_GIV
 boolean connected = false;
 IPAddress LMServerIP;
 
-#define AUDIOBLOCKSIZE 256
+#define AUDIOBLOCKSIZE 128
 
 float audioOutBuffer[AUDIOBLOCKSIZE];
 unsigned long audioFrame = 0;
@@ -70,6 +71,7 @@ bool streamingStarted = 0;
 int i2s_block_size = 128;
 
 int lastAmpVal = 0;
+int cxRed, cxBlue, cxGreen;
 
 void connectToAP() {
   netState = CONNECTING;
@@ -100,6 +102,7 @@ struct streamRequest {
 
 uint32_t serverAliveTimeStamp = 0;
 
+uint32_t tcpResponseTimer = 0;
 void mainLoop( void * pvParameters ) {
   int32_t outBuf[1024];
   String taskMessage = "Main loop task running on core ";
@@ -138,6 +141,7 @@ void mainLoop( void * pvParameters ) {
                 tcpClient.write((uint8_t*)&reqData, sizeof(streamRequest));
                 //                tcpClient.print('\n');
                 Serial.println("Sent control request, waiting for response...");
+                tcpResponseTimer = millis();
                 netState = WAITING_FOR_GIVE_REQ;
               } else {
                 Serial.println("Can't connect to LM Server control service");
@@ -166,11 +170,16 @@ void mainLoop( void * pvParameters ) {
               if (tcpClient.connect(LMServerIP, CONTROL_SERVICE_PORT)) {
                 streamRequest reqData(streamRequest::RECEIVE);
                 tcpClient.write((uint8_t*)&reqData, sizeof(streamRequest));
+                tcpResponseTimer = millis();
                 netState = WAITING_FOR_RECEIVE_REQ;
 
               } else {
                 Serial.println("Can't connect to LM Server control service");
               }
+            }
+          } else {
+            if (millis() - tcpResponseTimer > 1000) {
+              netState = WAITING_FOR_ADVERT;
             }
           }
           delay(100);
@@ -190,15 +199,23 @@ void mainLoop( void * pvParameters ) {
               tcpClient.stop();
               Serial.println("Starting to stream");
               streamingStarted = 0;
-              netState = CONNECTED;
               serverAliveTimeStamp = millis();
-              pixels.setPixelColor(0, pixels.Color(153 + random(-20, 20), 92 + random(-20, 20), 223 + random(-20, 20)));
+              cxRed = 153 + random(-40, 40);
+              cxGreen = 92 + random(-40, 40);
+              cxBlue = 223 + random(-40, 30);
+              pixels.setPixelColor(0, pixels.Color(cxRed, cxGreen, cxBlue));
               pixels.show();
+              netState = CONNECTED;
             }
             //                if (udpStreamIn.begin(LMServerIP, STREAM_TARGET_PORT)) {
             //                } else {
             //                  Serial.println("Error opening udpStreamIn");
             //                }
+          } else {
+            if (millis() - tcpResponseTimer > 1000) {
+              netState = WAITING_FOR_GIVE_REQ;
+            }
+
           }
           delay(500);
           break;
@@ -286,7 +303,10 @@ void mainLoop( void * pvParameters ) {
               //                Serial.println(recvRingCount);
 
               for (int i = 0; i < recvRingCount; i++) {
-                outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
+                int32_t w = int32_t(sampleBuf[i] * masterVol * (float)0x7fffffff);
+                w = max(w, -0x7fffffff);
+                w = min(w, 0x7fffffff);
+                outBuf[i * 2] = outBuf[(i * 2) + 1] = w;
               }
               vRingbufferReturnItem(recvRing, (void*)sampleBuf);
               size_t m_bytesWritten;
@@ -304,12 +324,18 @@ void mainLoop( void * pvParameters ) {
 
           if (samples_read > 0) {
             int val = analogRead(A6);
-            if (val < lastAmpVal-200 || val > lastAmpVal+200) {
+            if (val < lastAmpVal - 200 || val > lastAmpVal + 200) {
               masterVol = powf(val / 4095.0f, 2.f);
               lastAmpVal = val;
-              Serial.print("Amp: ");
-              Serial.println(masterVol);
+              //              Serial.print("Amp: ");
+              //              Serial.println(masterVol);
             };
+
+            frame++;
+            int mod = (int) (sinf((float)frame * 0.01) * 80.0);
+            pixels.setPixelColor(0, pixels.Color(cxRed + mod, cxGreen + mod, cxBlue + mod));
+            pixels.show();
+
           }
 
           //          size_t m_bytesWritten;
@@ -332,7 +358,7 @@ void mainLoop( void * pvParameters ) {
 
 
 
-
+uint32_t underrunCount = 0;
 void netReceiveLoop( void * pvParameters ) {
   //  int32_t outBuf[512];
   Serial.println("Net receive thread waiting");
@@ -355,29 +381,19 @@ void netReceiveLoop( void * pvParameters ) {
             int nSamples = udpMsgLength / sizeof(float);
             xRingbufferSend(recvRing, udpPacket, udpMsgLength, pdMS_TO_TICKS(0));
             serverAliveTimeStamp = millis();
-            //                     Serial.println(nSamples);
-            //          for (int i = 0; i < nSamples; i++) {
-            //            outBuf[i * 2] = outBuf[(i * 2) + 1] = int32_t(sampleBuf[i] * (float)0x7fffffff);
-            //            //            outBuf[i] = 0;
-            //          }
-            //          size_t m_bytesWritten;
-            //          esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&outBuf[0], 2 * nSamples * sizeof(int32_t), &m_bytesWritten, 0);
-            //          if (err != ESP_OK) {
-            //            Serial.print("ESP32 Errorcode ");
-            //            Serial.println(err);
-            //          }
             udpStreamIn.flush(); // empty UDP buffer for next packet
 
           }
           uint32_t now = millis();
           uint32_t gap = now - serverAliveTimeStamp;
-          if (gap > 2000) {
+          if (gap > 5000) {
             Serial.println("Lost the server, restarting");
             ESP.restart();
           }
         } else {
-          Serial.println("buffer underrun");
-          delay(0.1);
+          Serial.print("buffer underrun ");
+          Serial.println(underrunCount++);
+          delay(0.01);
         }
 
       }
